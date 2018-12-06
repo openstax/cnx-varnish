@@ -23,6 +23,7 @@ docker run openstax/cnx-varnish:latest
    | VARNISH_PRESS_PORT | port press is served on
    | VARNISH_ARCLISHING_DOMAIN | domain where the archive, publishing and press servers map to
    | VARNISH_FRONTEND_DOMAIN | domain where the webview ui can be seen
+   | VARNISH_ALLOWED_PURGE_SUBNET | network subnet for which purge requests can be made
 
 ## Copyright
 

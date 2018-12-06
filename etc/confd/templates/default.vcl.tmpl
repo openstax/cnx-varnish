@@ -78,6 +78,10 @@ backend press {
 acl purge {
     "localhost";
     "127.0.0.1";
+    # Allow anyone in the container's network to purge
+    # You can get this value by inspecting the network
+    # ``docker network inspect -f "{{ range .IPAM.Config  }}{{ .Subnet }}{{ end }}" $NETWORK_NAME``
+    "{{ getenv "VARNISH_ALLOWED_PURGE_SUBNET" }}";
 }
 
 acl nocache {
