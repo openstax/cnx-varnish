@@ -6,7 +6,7 @@ pipeline {
     stage('Build Dev Container') {
       // all branches
       steps {
-        sh "docker build -t openstax/cnx-varnish:dev ."
+        sh "cd cnx && docker build -t openstax/cnx-varnish:dev ."
       }
     }
     stage('Publish Latest Release') {
