@@ -2,17 +2,10 @@ vcl 4.0;
 
 import std;
 
-# TODO: low priority
-acl block {
-}
-
-# Needed for cnx.org/.*/enqueue and *format=rdf for PDFgen
 # haproxy load balancing for zope
-# TODO: legacy software isn't containerized yet
-# FIXME: Use place holders in the mean time
 backend legacy_frontend {
-.host = "localhost";
-.port = "80";
+.host = "{{ getenv "VARNISH_LEGACY_HOST" }}";
+.port = "{{ getenv "VARNISH_LEGACY_PORT" }}";
 .connect_timeout = 0.4s;
 .first_byte_timeout = 1200s;
 .between_bytes_timeout = 600s;
@@ -27,54 +20,6 @@ backend static_files {
 .between_bytes_timeout = 10s;
 }
 
-backend webview {
-.host = "{{ getenv "VARNISH_WEBVIEW_HOST" }}";
-.port = "{{ getenv "VARNISH_WEBVIEW_PORT" }}";
-.connect_timeout = 0.4s;
-.first_byte_timeout = 600s;
-.between_bytes_timeout = 60s;
-}
-
-probe archive_probe {
-    .url = "/extras";
-    .expected_response = 200;
-}
-
-backend archive {
-.host = "{{ getenv "VARNISH_ARCHIVE_HOST" }}";
-.port = "{{ getenv "VARNISH_ARCHIVE_PORT" }}";
-.probe = archive_probe;
-.connect_timeout = 0.4s;
-.first_byte_timeout = 600s;
-.between_bytes_timeout = 60s;
-}
-
-probe publishing_probe {
-    .expected_response = 404;
-}
-
-backend publishing {
-.host = "{{ getenv "VARNISH_PUBLISHING_HOST" }}";
-.port = "{{ getenv "VARNISH_PUBLISHING_PORT" }}";
-.probe = publishing_probe;
-.first_byte_timeout = 600s;
-.between_bytes_timeout = 60s;
-}
-
-probe press_probe {
-    .url = "/ping";
-    .expected_response = 200;
-}
-
-backend press {
-.host = "{{ getenv "VARNISH_PRESS_HOST" }}";
-.port = "{{ getenv "VARNISH_PRESS_PORT" }}";
-.probe = press_probe;
-.first_byte_timeout = 600s;
-.between_bytes_timeout = 60s;
-}
-
-# TODO: low priority
 acl purge {
     "localhost";
     "127.0.0.1";
@@ -89,138 +34,91 @@ acl nocache {
     "10.0.0.0"/8;
 }
 
-sub vcl_init {
-    # nothing to do here...
-}
+/* In vcl_recv, make decisons about routing to backends, and any url rewriting
+   that may be needed for a particular backend
+   Also, pipe setting, if any */
 
 sub vcl_recv {
+    set req.backend_hint = legacy_frontend;
 
-    if (client.ip ~ block) {
+    if (req.url == "/join_form") {
         return (synth(403, "Access denied"));
     }
 
-    if (req.url ~ "^/ping") {
-        set req.backend_hint = webview;
-        return (pass);
+    if (req.method == "POST" && req.url ~ "^/content/[mc]" 
+                       && req.url !~ "(reuse_edit|(favorites|lens)_add)_inner" 
+                       && req.url !~ "@@reuse-edit-view"
+                       && req.url !~ "lensAdd"
+                       && req.url !~ "setPrintedFile" 
+                       && req.url !~ "updateParameters" 
+                       && req.url !~ "manage_addProperty" 
+                       && req.http.referer !~ "manage_propertiesForm") {
+        return (synth(403, "Access denied (POST)"));
     }
 
-    if (req.url ~ "^/api/") {
-       set req.backend_hint = press;
-       # let the client talk directly to Press,
-       # because litezip publishing payloads are huge.
-       return (pipe);
-    }
-
-    # cnx rewrite stub login form
-    if (req.url ~ "^/stub-login-form") {
-        set req.backend_hint = publishing;
-        return (pass);
-    }
-
-    # cnx rewrite archive
-    if (req.url ~ "^/a/") {
-        set req.backend_hint = publishing;
-        return (pass);
-    }
-
-    # cnx rewrite archive  - specials served from nginx statically
-    if (req.http.host ~ "^{{ getenv "VARNISH_ARCLISHING_DOMAIN" }}" || req.url ~ "^/sitemap.*.xml") {
-
-        if (req.url  == "/robots.txt" || req.url ~ "^/specials") {
-            set req.backend_hint = static_files;
-            return (hash);
-        }
-
-        elsif ( req.method == "POST" || req.method == "PUT" || req.method == "DELETE" || req.url ~ "^/(publications|callback|a|login|logout|moderations|feeds/moderations.rss|contents/.*/(licensors|roles|permissions))") {
-            set req.backend_hint = publishing;
-            return (pass);
-        }
-
-        elsif ( req.url ~ "^/exports/") {
-            set req.backend_hint = archive;
-            return (pass);
-        }
-
-        elsif (req.url ~ "^/resources/") {
-            set req.backend_hint = archive;
-            return (hash);
-        }
-
-        else {
-            set req.backend_hint = archive;
-            return (hash);
+    if (req.url ~ "^/lenses") {
+        if (req.http.user-agent ~ "Baiduspider"
+            || req.http.user-agent ~ "ScoutJet"
+            || req.http.user-agent ~ "bingbot") {
+            return (synth(403, "Access denied"));
         }
     }
 
-    # resource images
-    if (req.url ~ "^/resources/") {
-        set req.backend_hint = archive;
-        return (hash);
+    if (req.http.user-agent ~ "equella|360Spider") {
+        return (synth(403, "Access denied"));
     }
 
-    elsif ( req.url ~ "^/exports/") {
-        set req.backend_hint = archive;
-        return (pass);
-    }
-
-
-    # FIXME req.grace cannot be used here, see also
-    #       https://www.varnish-cache.org/docs/4.0/users-guide/vcl-grace.html
-    # set req.grace = 120s;
-    if (req.http.host ~ "^{{ getenv "VARNISH_FRONTEND_DOMAIN" }}(:[0-9]+)?$") {
-
-        /* doing the static file dance */
-        if (req.url ~ "^/pdfs") {
-            set req.backend_hint = static_files;
-            set req.url = regsub(req.url, "^/pdfs", "/files");
-        }
-        elsif (req.restarts == 0  && req.url ~ "^/content/.*/enqueue") {
-            set req.backend_hint = legacy_frontend;
-            return(pass);
-        }
-        elsif (req.restarts == 0  && req.url ~ "^/content/col.*/?\?format=rdf") {
-            set req.backend_hint = legacy_frontend;
-            return(hash);
-        }
-        elsif (req.restarts == 0  && req.url ~ "^/content/.*/module_export_template") {
-            set req.backend_hint = legacy_frontend;
-            return(hash);
-        }
-        elsif (req.restarts == 0  && req.url ~ "^/content/(m[0-9]+)/([0-9.]+)/.*format=pdf$") {
-            set req.backend_hint = static_files;
-            set req.url = regsub(req.url, "^/content/(m[0-9]+)/([0-9.]+)/.*format=pdf", "/files/\1-\2.pdf");
-        }
-        elsif (req.restarts == 1  && req.url ~ "^/files/(m[0-9]+)-([0-9.]+)\.pdf") {
-            set req.backend_hint = legacy_frontend;
-            set req.url = regsub(req.url, "^/files/(m[0-9]+)-([0-9.]+)\.pdf", "/content/\1/\2/?format=pdf");
-        }
-        elsif (req.url ~ "^/content/((col|m)[0-9]+)/latest/(pdf|epub)$") {
-            set req.backend_hint = legacy_frontend;
-            return(hash);
-        }
-        elsif (req.url ~ "^/content/((col|m)[0-9]+)/([0-9.]+)/(pdf|epub)$") {
-            set req.backend_hint = static_files;
-            set req.url = regsub(req.url, "^/content/((col|m)[0-9]+)/([0-9.]+)/.*(pdf|epub)", "/files/\1-\3.\4");
-        }
-        elsif (req.url ~ "^/content/((col|m)[0-9]+)/([0-9.]+)/(complete|offline)$") {
-            set req.backend_hint = static_files;
-            set req.url = regsub(req.url, "^/content/((col|m)[0-9]+)/([0-9.]+)/(complete|offline)", "/files/\1-\3.\4.zip");
-        }
-        elsif (req.url ~ "^/content/(col[0-9]+)/([0-9.]+)/source$") {
-            set req.backend_hint = static_files;
-            set req.url = regsub(req.url, "^/content/(col[0-9]+)/([0-9.]+)/source", "/files/\1-\2.xml");
-        }
-        elsif (req.url ~ "^/content/((col|m)[0-9]+)") {
-            set req.backend_hint = archive;
-        }
-        // all webview
-        elsif (req.url ~ "_escaped_fragment_=" || req.url ~ "^/$" || req.url ~ "^/?.*" || req.url ~ "^/opensearch\.xml" || req.url ~ "^/version\.txt" || req.url ~ "^/search" || req.url ~ "^/contents$" || req.url ~ "^/(contents|data|exports|styles|fonts|bower_components|node_modules|images|scripts)/" || req.url ~ "^/(about|about-us|people|contents|donate|tos|browse)" || req.url ~ "^/(login|logout|workspace|callback|users|publish|robots.txt)") {
-            set req.backend_hint = webview;
-
-        }
-    }
-    else {
+    if (req.http.host !~ "^{{ getenv "VARNISH_FRONTEND_LEGACY_DOMAIN" }}") {
         return (synth(750, "Moved Permanently"));
+    }
+
+    /* doing the static file dance */
+    if (req.url ~ "^/pdfs") {
+        set req.backend_hint = static_files;
+        set req.url = regsub(req.url, "^/pdfs", "/files");
+        return(pass);
+    }
+    elsif (req.restarts == 0  && req.url ~ "^/content/(m[0-9]+)/([0-9.]+)/.*format=pdf$") {
+        set req.backend_hint = static_files;
+        set req.url = regsub(req.url, "^/content/(m[0-9]+)/([0-9.]+)/.*format=pdf", "/files/\1-\2.pdf");
+        return(pass);
+    }
+    elsif (req.url ~ "^/content/((col|m)[0-9]+)/([0-9.]+)/(pdf|epub)$") {
+        set req.backend_hint = static_files;
+        set req.url = regsub(req.url, "^/content/((col|m)[0-9]+)/([0-9.]+)/.*(pdf|epub)", "/files/\1-\3.\4");
+        return(pass);
+    }
+    elsif (req.url ~ "^/content/((col|m)[0-9]+)/([0-9.]+)/(complete|offline)$") {
+        set req.backend_hint = static_files;
+        set req.url = regsub(req.url, "^/content/((col|m)[0-9]+)/([0-9.]+)/(complete|offline)", "/files/\1-\3.\4.zip");
+        return(pass);
+    }
+    elsif (req.url ~ "^/content/(col[0-9]+)/([0-9.]+)/source$") {
+        set req.backend_hint = static_files;
+        set req.url = regsub(req.url, "^/content/(col[0-9]+)/([0-9.]+)/source", "/files/\1-\2.xml");
+        return(pass);
+    }
+    /* module PDF failed to load from static_files - restarted */
+    elsif (req.restarts == 1  && req.url ~ "^/files/(m[0-9]+)-([0-9.]+)\.pdf") {
+        set req.backend_hint = legacy_frontend;
+        set req.url = regsub(req.url, "^/files/(m[0-9]+)-([0-9.]+)\.pdf", "/content/\1/\2/?format=pdf");
+    }
+
+    /*  avoid multiple rewrites on restart */
+    if (req.url !~ "VirtualHostBase" ) {
+        if  ( req.http.X-Secure ) {
+            set req.url = "/VirtualHostBase/https/{{ getenv "VARNISH_FRONTEND_LEGACY_DOMAIN" }}:443/plone/VirtualHostRoot" + req.url;
+            }
+        else {
+            set req.url = "/VirtualHostBase/http/{{ getenv "VARNISH_FRONTEND_LEGACY_DOMAIN" }}:80/plone/VirtualHostRoot" + req.url;
+        }
+    }
+
+    if (req.url ~ "/content/[^/]+/enqueue") {
+        return(pass);
+    }
+    elsif (req.url ~ "/content/((col|m)[0-9]+)/latest/(getVersion|pdf|epub|complete|offline|module_export_template)$") {
+        return(pass);
     }
 
     if (req.method == "PURGE") {
@@ -282,6 +180,11 @@ sub vcl_hit {
     if (req.http.Cache-Control ~ "no-cache") {
         # like msnbot that send no-cache with every request.
         if (client.ip ~ nocache) {
+            # FIXME https://www.varnish-cache.org/docs/4.0/whats-new/upgrading.html#obj-is-now-read-only
+            # set obj.ttl = 0s;
+            # FIXME https://www.varnish-cache.org/docs/4.0/whats-new/upgrading.html#backend-restarts-are-now-retry
+            # return (restart);
+
             return(pass);
         }
     }
@@ -295,12 +198,6 @@ sub vcl_miss {
 }
 
 sub vcl_backend_response {
-    if (bereq.url ~ "^/scripts/(?:main|settings)[.]js$") {
-        set beresp.http.Cache-Control = "max-age=3600";
-    }
-    elsif (bereq.url ~ "^/locale") {
-        set beresp.http.Cache-Control = "max-age=3600";
-    }
     if (beresp.status >= 500) {
         set beresp.ttl = 0s;
     }
@@ -341,26 +238,6 @@ sub vcl_backend_response {
         set beresp.http.X-Varnish-Action = "FETCH (override - backend not setting cache control)";
     }
 
-    if (bereq.http.host  ~ "^{{ getenv "VARNISH_ARCLISHING_DOMAIN" }}") {
-        if (bereq.url ~ "^/contents/") {
-            set beresp.ttl = 3600s;
-            set beresp.http.X-Varnish-Action = "FETCH (override - archive contents)";
-        }
-        if (bereq.url ~ "^/extras") {
-            set beresp.ttl = 600s;
-            set beresp.http.X-Varnish-Action = "FETCH (override - archive extras)";
-        }
-    }
-    if (bereq.url ~ "^/contents/") {
-        set beresp.ttl = 7d;
-        set beresp.http.X-Varnish-Action = "FETCH (override - archive contents)";
-    }
-
-    if (bereq.url ~ "^/resources") {
-        set beresp.ttl = 30d;
-        set beresp.http.X-Varnish-Action = "FETCH (override - resources)";
-    }
-
     # Default based on %age of Last-Modified, like squid
     if (!beresp.http.Cache-Control && !beresp.http.Expires && !beresp.http.X-Varnish-Action) {
         # FIXME Is the following a valid replacement for this inline C?
@@ -385,10 +262,17 @@ sub vcl_backend_response {
         set beresp.http.X-FACTOR-TTL = "ttl: " + beresp.ttl;
     }
 
-    if (bereq.url ~ "content/[^/]*/[0-9.]*/(\?format=)?pdf$") {
-        set beresp.http.X-My-Header = "VersionedPDF";
+    if (bereq.url ~ "content/OAI\?verb=List(Identifier|Record)s&metadataPrefix=[^&]*$") {
+        set beresp.ttl = 7d;
+        set beresp.http.X-My-Header = "OAI";
+    }
+    if (bereq.url ~ "content/randomContent") {
         set beresp.uncacheable = true;
         return(deliver);
+    }
+    if (bereq.url ~ "content/[^/]*/[0-9.]*/(\?format=)?pdf$") {
+        set beresp.ttl = 7d;
+        set beresp.http.X-My-Header = "VersionedPDF";
     }
     if (bereq.url ~ "content/[^/]*/latest/(\?format=)?pdf$") {
         set beresp.http.X-My-Header = "LatestPDF";
@@ -405,6 +289,24 @@ sub vcl_backend_response {
         set beresp.uncacheable = true;
         return(deliver);
     }
+    if (bereq.url ~ "content/[^/]*/latest/offline$") {
+        set beresp.http.X-My-Header = "LatestOffline";
+        set beresp.uncacheable = true;
+        return(deliver);
+    }
+    if (bereq.url ~ "content/[^/]*/latest/complete$") {
+        set beresp.http.X-My-Header = "LatestComplete";
+        set beresp.uncacheable = true;
+        return(deliver);
+    }
+    if (bereq.url ~ "content/[^/]*/latest/getVersion$") {
+        set beresp.uncacheable = true;
+        return(deliver);
+    }
+    if (bereq.url ~ "content/[^/]*/latest/module_export_template$") {
+        set beresp.uncacheable = true;
+        return(deliver);
+    }
     call rewrite_s_maxage;
     set beresp.http.X-FACTOR-TTL = "ttl: " + beresp.ttl;
     return(deliver);
@@ -412,7 +314,7 @@ sub vcl_backend_response {
 
 sub vcl_backend_error {
     if (beresp.status == 750) {
-        set beresp.http.Location = "http://" + regsub(bereq.http.host, "^[^:]*", "{{ getenv "VARNISH_FRONTEND_DOMAIN" }}") + bereq.url;
+        set beresp.http.Location = "http://" + regsub(bereq.http.host, "^[^:]*", "cnx.org") + bereq.url;
         set beresp.status = 301;
         return(deliver);
     } elsif (beresp.status == 700) {
@@ -429,19 +331,6 @@ sub vcl_deliver {
                 set resp.http.X-Cache = "MISS";
         }
     call rewrite_age;
-}
-
-sub vcl_hash {
-    hash_data(req.url);
-    if (req.http.host) {
-        hash_data(req.http.host);
-    } else {
-        hash_data(server.ip);
-    }
-    if (req.http.Accept ~ "application/xhtml\+xml" && req.url ~ "^/contents/") {
-        hash_data("application/xhtml+xml");
-    }
-    return (lookup);
 }
 
 ##########################
