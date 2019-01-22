@@ -1,4 +1,4 @@
-FROM openstax/varnish:1.0.0 as target
+FROM openstax/varnish:1.1.0 as target
 
 COPY etc/confd /etc/confd
 
